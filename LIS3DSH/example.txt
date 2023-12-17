@@ -1,0 +1,459 @@
+/*	сохраняем данный файл в кодировке UTF-8		*/
+
+	author: Golinskiy Konstantin	e-mail: golinskiy.konstantin@gmail.com
+	
+	// в файле LIS3DSH_config.h настраиваем наш модуль
+	
+	/*
+
+		Подключение:
+					
+					VDD 							Напряжение питания от 1,71 В до 3,6 В
+					GND 
+					CS								Выбор режима работы SPI/I2C если он подтянут к HIGH работает по I2C если к LOW то с SPI ( у модуля по умолчанию подтянут к HIGH )
+					INT1							Выход прерывания 1. при включении прерывания незабываем подтянуть его к провотиположному питанию, по умолчанию стоит прерывание по восходящему фронту ( активный уровень HIGH )
+					INT2							Выход прерывания 2. при включении прерывания незабываем подтянуть его к провотиположному питанию, по умолчанию стоит прерывание по восходящему фронту ( активный уровень HIGH )
+					SDO/ALT						Последовательный вывод данных (SPI 4-Wire MISO) / Альтернативный I2C Выбор адреса (I2C). ( у модуля меняет адрес шины I2C подтянут к LOW ( default ) )
+					SDA/SDI/SDIO			Серийные данные (I2C)/Последовательный ввод данных (SPI 4-Wire MOSI)/Последовательный ввод и вывод данных (SPI 3-Wire). 
+					SCL/SCLK					Часы последовательной связи. SCL - это часы для I2C, а SCLK - это часы для SPI.
+					
+					
+					для SPI -> maximum SPI clock speed is 10 MHz -> (CPOL) = 0 (LOW) and clock phase (CPHA) = 0 (1EDGE)
+	*/
+
+	//===  SETUP ===========================================================
+
+			#define LIS3DSH_I2C_MODE
+			//#define LIS3DSH_SPI_MODE	
+
+
+	#if (defined LIS3DSH_I2C_MODE) && !(defined LIS3DSH_SPI_MODE)
+			// выбераем адрес датчика
+			#define LIS3DSH_ADDRESS 		(0x1E << 1)			// адрес устройства если пин  SDO/ALT подтянут к LOW
+			//#define LIS3DSH_ADDRESS 	(0x1D << 1)			// адрес устройства если пин  SDO/ALT подтянут к HIGH
+			
+			// указываем шину I2C
+			#define LIS3DSH_I2C					hi2c1
+
+	#elif !(defined LIS3DSH_I2C_MODE) && (defined LIS3DSH_SPI_MODE)
+			//для SPI -> maximum SPI clock speed is 10 MHz -> (CPOL) = 0 (LOW) and clock phase (CPHA) = 0 (1EDGE)
+			// указываем шину SPI
+			#define LIS3DSH_SPI					hspi1
+			
+			// указываем порт и пин CS
+			#if !defined (CS_GPIO_Port)
+				#define CS_GPIO_Port    	GPIOA
+				#define CS_Pin						GPIO_PIN_14
+			#endif
+			
+	#endif
+
+
+	//======================================================================
+	
+	
+	
+	
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	#include "LIS3DSH.h"
+
+	// для расчетов углов наклона датчика
+	#include <math.h> 
+
+	uint8_t LIS3DSH_ID = 0;			// вернет 0x3F
+
+	int16_t AccXYZ[3] = {0, };	// массив куда будем считывать данные с датчика по осям X Y Z
+
+
+	float roll = 0.0f;
+	float pitch = 0.0f;
+
+	float rollF = 0.0f;
+	float pitchF = 0.0f;
+
+	volatile uint8_t interrupt_flag = 0;
+
+
+	int8_t temperature = 0;
+
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	.........
+	.........
+
+main()=============================================================================================================================
+
+	.........
+	.........
+	.........
+	
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	//--------------------------------------------------------------------------------------------
+	// читаем ID датчика ( должен вернуть I_AM_LIS3DSH -> 0x3f )
+	LIS3DSH_ID = LIS3DSH_ReadID();
+	
+	// проверяем увидели ли датчик
+	if( I_AM_LIS3DSH == LIS3DSH_ID ){
+		// LIS3DSH OK
+	}
+	else{
+		// LIS3DSH ERROR
+	}
+	//--------------------------------------------------------------------------------------------
+	
+	
+	// сбрасываем все настройки в датчике к дефолтным
+	LIS3DSH_RebootCmd();
+	
+	
+	
+	//--------------------------------------------------------------------------------------------
+	// создаем структуру для настройки датчика
+	LIS3DSH_InitTypeDef myAccConfigDef;
+
+	myAccConfigDef.Output_DataRate = LIS3DSH_DATARATE_100;			// частота выборки ( замер ), либо LIS3DSH_DATARATE_POWERDOWN
+	myAccConfigDef.Full_Scale = LIS3DSH_FULLSCALE_2;						// шкала 2g 4g 6g 8g 16g ( грамм )
+	myAccConfigDef.Filter_BW = LIS3DSH_FILTER_BW_40;						// частота работы внутрешнего фильтра
+	myAccConfigDef.Axes_Enable = LIS3DSH_XYZ_ENABLE;						// указываем с какими осями будем работать X Y Z
+	myAccConfigDef.Self_Test = LIS3DSH_SELFTEST_NORMAL;					// указываем режим самотестирования
+	myAccConfigDef.SPI_Wire = LIS3DSH_SERIALINTERFACE_4WIRE;		// SPI 4 проводной интерфейс ( работает только в режиме SPI в I2C режиме можно писать любой будет игнорироваться )
+
+	
+	// записываем выше указаные настройки в датчик
+	LIS3DSH_Init(&myAccConfigDef);
+	//--------------------------------------------------------------------------------------------
+	
+	
+	//==== INTERRUPT =============================================================================
+	
+	// Set LIS3DSH Interrupt configuration
+	LIS3DSH_InterruptConfigTypeDef myAccInterruptConfig;
+	
+	// для всех прерываний сперва указываем общие настройки для всех прерываний, указываем пины где будут висеть прерывания и включаем автоматы ( от них и зависит какое прерывание будет )
+	// например включаем второй автомат .State_Machine2_Enable = LIS3DSH_SM_ENABLE и указываем что на нем будет работать первый пин .State_Machine2_Interrupt = LIS3DSH_SM_INT1;
+	// предварительно включив его .Interrupt_Selection_Enable = LIS3DSH_INTERRUPT_1_ENABLE;
+	// настройки одни и теже для разных прерываний
+	// единственное если включим .Interrupt_DataReady_INT1 = LIS3DSH_INTERRUPT_DATA_READY_ENABLE;
+	myAccInterruptConfig.Interrupt_Request = LIS3DSH_INTERRUPT_REQUEST_PULSED;  					// LIS3DSH_INTERRUPT_REQUEST_PULSED - пульс   или   LIS3DSH_INTERRUPT_REQUEST_LATCHED - защелка
+	myAccInterruptConfig.Interrupt_Selection_Enable = LIS3DSH_INTERRUPT_1_2_ENABLE;				// сигнал на ножке если не включен то будет (High-Z state) LIS3DSH_INTERRUPT_1_ENABLE,  LIS3DSH_INTERRUPT_2_ENABLE ,  LIS3DSH_INTERRUPT_1_2_ENABLE
+	myAccInterruptConfig.Interrupt_Signal = LIS3DSH_INTERRUPT_SIGNAL_HIGH;								// LIS3DSH_INTERRUPT_SIGNAL_HIGH    LIS3DSH_INTERRUPT_SIGNAL_LOW
+	myAccInterruptConfig.Interrupt_DataReady_INT1 = LIS3DSH_INTERRUPT_DATA_READY_DISABLE;	// включаем или отключаем прерывание когда данные готовы ( работает только на INT1, для других типов прерываний отключаем ) 
+																																												// LIS3DSH_INTERRUPT_DATA_READY_ENABLE, LIS3DSH_INTERRUPT_DATA_READY_DISABLE
+	myAccInterruptConfig.Interrupt_Vector_Filter = LIS3DSH_VLIFT_VECTOR_FILTER_ENABLE;		// вкл или выкл векторный фильтр LIS3DSH_VLIFT_VECTOR_FILTER_ENABLE, LIS3DSH_VLIFT_VECTOR_FILTER_DISABLE
+	myAccInterruptConfig.State_Machine1_Enable = LIS3DSH_SM_ENABLE;												// включаем текуший автомат или нет LIS3DSH_SM_DISABLE    LIS3DSH_SM_ENABLE
+	myAccInterruptConfig.State_Machine1_Interrupt = LIS3DSH_SM_INT1;											// на каких ножках будет прерывание LIS3DSH_SM_INT1   LIS3DSH_SM_INT2
+	myAccInterruptConfig.State_Machine1_Hysteresis = LIS3DSH_SM_HYST_0;										// указываем уровень гистерезиса от 0 до 7
+	myAccInterruptConfig.State_Machine2_Enable = LIS3DSH_SM_ENABLE;												// включаем текуший автомат или нет LIS3DSH_SM_DISABLE    LIS3DSH_SM_ENABLE
+	myAccInterruptConfig.State_Machine2_Interrupt = LIS3DSH_SM_INT2;											// на каких ножках будет прерывание LIS3DSH_SM_INT1   LIS3DSH_SM_INT2
+	myAccInterruptConfig.State_Machine2_Hysteresis = LIS3DSH_SM_HYST_0;										// указываем уровень гистерезиса от 0 до 7
+
+
+#if 0
+ 	//-- WakeUp - срабатывает от любого движения --------------------------
+	// указываем номер автомата STATE_MACHINE_ONE или STATE_MACHINE_TWO
+	// и силу удара чувствительность ( в миллиграммах )
+	// диаппвзон зависит от установленого значения LIS3DSH_FULLSCALE_X
+	//LIS3DSH_FULLSCALE_2:	// [15,625 - 3984]mg
+	//LIS3DSH_FULLSCALE_4:	// [31.25 - 7968.75]mg
+	//LIS3DSH_FULLSCALE_6:	// [46.875 - 11953.125]mg
+	//LIS3DSH_FULLSCALE_8:	// [62.5 - 15937.5]mg
+	//LIS3DSH_FULLSCALE_16:	// [125 - 31875]mg
+	LIS3DSH_WakeUp_InterruptConfig(STATE_MACHINE_TWO, 924.5);
+	//-----------------------------------------------------------------------
+#endif
+
+
+#if 0
+	//-- Toggle — это простая конфигурация конечного автомата, которая генерирует прерывание каждые n выборок. -----
+	// генерирует прерывание через указанное кол-во замеров 
+	LIS3DSH_Toggle_InterruptConfig(STATE_MACHINE_ONE, 5 );
+	//-----------------------------------------------------------------------
+#endif
+
+
+#if 0
+	//-- FreeFall -- прерывание от свободного падения ------------------------
+	// указываем номер автомата STATE_MACHINE_ONE или STATE_MACHINE_TWO
+	// и силу удара чувствительность ( в миллиграммах )
+	// диаппвзон зависит от установленого значения LIS3DSH_FULLSCALE_X
+	//LIS3DSH_FULLSCALE_2:	// [15,625 - 3984]mg
+	//LIS3DSH_FULLSCALE_4:	// [31.25 - 7968.75]mg
+	//LIS3DSH_FULLSCALE_6:	// [46.875 - 11953.125]mg
+	//LIS3DSH_FULLSCALE_8:	// [62.5 - 15937.5]mg
+	//LIS3DSH_FULLSCALE_16:	// [125 - 31875]mg
+	// время свободного падения в миллисекундах
+	// диаппвзон зависит от установленого значения частоты модуля LIS3DSH_DATARATE_X
+	//LIS3DSH_DATARATE_3_125:		// 320.0ms - 81600.0ms
+	//LIS3DSH_DATARATE_6_25:		// 160.0ms - 40800.0ms
+	//LIS3DSH_DATARATE_12_5:		// 80.0ms - 20400.0ms
+	//LIS3DSH_DATARATE_25:			// 40.0ms - 10200.0ms
+	//LIS3DSH_DATARATE_50:			// 20.0ms - 5100.0ms
+	//LIS3DSH_DATARATE_100:			// 10.0ms - 2550.0ms
+	//LIS3DSH_DATARATE_400:			// 2.5ms - 637.5ms
+	//LIS3DSH_DATARATE_800:			// 1.25ms - 318.75ms
+	//LIS3DSH_DATARATE_1600:		// 0.625ms - 159.375ms
+	LIS3DSH_FreeFall_InterruptConfig(STATE_MACHINE_ONE, 156.0, 25.0);	// 156.0, 25.0 for LIS3DSH_FULLSCALE_2 and LIS3DSH_DATARATE_400
+	//-----------------------------------------------------------------------
+#endif	
+
+
+#if 0
+	//-- SingleClick одинарный удар -----------------------------------------
+	// указываем номер автомата STATE_MACHINE_ONE или STATE_MACHINE_TWO
+	// и силу удара чувствительность ( в миллиграммах )
+	// диаппвзон зависит от установленого значения LIS3DSH_FULLSCALE_X
+	//LIS3DSH_FULLSCALE_2:	// [15,625 - 3984]mg
+	//LIS3DSH_FULLSCALE_4:	// [31.25 - 7968.75]mg
+	//LIS3DSH_FULLSCALE_6:	// [46.875 - 11953.125]mg
+	//LIS3DSH_FULLSCALE_8:	// [62.5 - 15937.5]mg
+	//LIS3DSH_FULLSCALE_16:	// [125 - 31875]mg
+	LIS3DSH_SingleClick_InterruptConfig(STATE_MACHINE_ONE, 1328.0);
+	//-----------------------------------------------------------------------
+#endif
+
+
+#if 0
+	//-- Double Turn перевертывание устройства ------------------------------------
+	// Идея может заключаться в том, чтобы использовать эту функцию в мобильном телефоне для включения или выключения звонка.
+	// тон, распознавая такие жесты, как «Лицом вверх» — «Лицом вниз» — «Лицом вверх».
+	// Функция выполняется с использованием 4 состояний:
+	// проверьте, не ниже ли ускорение по оси Z порогового значения 1.
+	// проверьте, не ниже ли ускорение по оси Z порогового значения 2.
+	// проверьте, не превышает ли ускорение по оси Z пороговое значение 2.
+	// проверьте, не превышает ли ускорение по оси Z пороговое значение 1.
+	//----------------
+	// указываем номер автомата STATE_MACHINE_ONE или STATE_MACHINE_TWO
+	// и силу удара чувствительность ( в миллиграммах )
+	// диаппвзон зависит от установленого значения LIS3DSH_FULLSCALE_X
+	//LIS3DSH_FULLSCALE_2:	// [15,625 - 3984]mg
+	//LIS3DSH_FULLSCALE_4:	// [31.25 - 7968.75]mg
+	//LIS3DSH_FULLSCALE_6:	// [46.875 - 11953.125]mg
+	//LIS3DSH_FULLSCALE_8:	// [62.5 - 15937.5]mg
+	//LIS3DSH_FULLSCALE_16:	// [125 - 31875]mg
+	LIS3DSH_DoubleTurn_InterruptConfig(STATE_MACHINE_ONE, 750.0, 3250);
+	//-----------------------------------------------------------------------
+#endif
+
+
+#if 1
+	//-- Double Tap двойной удар ------------------------------------
+	// указываем номер автомата STATE_MACHINE_ONE или STATE_MACHINE_TWO
+	// и силу удара чувствительность ( в миллиграммах )
+	// диаппвзон зависит от установленого значения LIS3DSH_FULLSCALE_X
+	//LIS3DSH_FULLSCALE_2:	// [15,625 - 3984]mg
+	//LIS3DSH_FULLSCALE_4:	// [31.25 - 7968.75]mg
+	//LIS3DSH_FULLSCALE_6:	// [46.875 - 11953.125]mg
+	//LIS3DSH_FULLSCALE_8:	// [62.5 - 15937.5]mg
+	//LIS3DSH_FULLSCALE_16:	// [125 - 31875]mg
+	// время между ударами в миллисекундах
+	// диаппвзон зависит от установленого значения частоты модуля LIS3DSH_DATARATE_X
+	//LIS3DSH_DATARATE_3_125:		// 320.0ms - 81600.0ms
+	//LIS3DSH_DATARATE_6_25:		// 160.0ms - 40800.0ms
+	//LIS3DSH_DATARATE_12_5:		// 80.0ms - 20400.0ms
+	//LIS3DSH_DATARATE_25:			// 40.0ms - 10200.0ms
+	//LIS3DSH_DATARATE_50:			// 20.0ms - 5100.0ms
+	//LIS3DSH_DATARATE_100:			// 10.0ms - 2550.0ms
+	//LIS3DSH_DATARATE_400:			// 2.5ms - 637.5ms
+	//LIS3DSH_DATARATE_800:			// 1.25ms - 318.75ms
+	//LIS3DSH_DATARATE_1600:		// 0.625ms - 159.375ms
+	LIS3DSH_DoubleTap_InterruptConfig(STATE_MACHINE_ONE, 1328.0, 500.0);
+	//-----------------------------------------------------------------------
+#endif
+
+
+
+
+
+	//вызываем в конце всех настроек автоматов ( для прерывания )
+	LIS3DSH_InterruptConfig( &myAccInterruptConfig );
+	
+	//============================================================================================
+	
+	//--------------------------------------------------------------------------------------------
+	// изменяем частоту выборки уже после указанной в LIS3DSH_Init 
+	// если вдруг нужно изменить частоту выборки в процессе работы
+	//LIS3DSH_DataRateCmd(LIS3DSH_DATARATE_100);	// либо LIS3DSH_DATARATE_POWERDOWN
+	//--------------------------------------------------------------------------------------------
+	
+	
+	//--------------------------------------------------------------------------------------------
+	// изменяем шкалу 2g 4g 6g 8g 16g ( грамм ) уже после указанной в LIS3DSH_Init
+	// если вдруг нужно изменить шкалу в процессе работы
+	//LIS3DSH_FullScaleCmd(LIS3DSH_FULLSCALE_8);
+	//--------------------------------------------------------------------------------------------
+	
+	
+	
+	//--------------------------------------------------------------------------------------------
+	// Калибровка осей акселерометра ( нужна для получения градусов наклона,
+	// если это не нужно калибровать нет смысла, для более точного получения градусов наклона устанавливать на LIS3DSH_FULLSCALE_8 )
+	// запускаем калибровку после установки настроек LIS3DSH_Init(&myAccConfigDef);
+	// в момент калибровки нужно вращать ( крутить ) датчик во всех направлениях ( но окуратно без ударов и резких движений так как они некоректно влияют на калибровку )
+	// в этот момент калибровка будет записывать в функцию максимум и минимум значения как только значения запишуться и новых небудет 
+	// то по истечении времени #define TIME_CALIB_END калибровка закончиться и в датчик будут записаны смещения LIS3DSH_setAxisOffsetXYZ для всех осей
+	// эти данные храняться в датчике пока есть питание ( после перезагрузки там будут 0 )
+	// если мы хотим при следующем включении не калибровать то можно после калибровки 
+	// с помощью функций LIS3DSH_пetAxisOffsetXYZ считать все смещения и записать в EEPROM. 
+	// а при запуске устройства оттуда считывать и уже напрямую записывать в датчик без калибровки с помощью функции LIS3DSH_setAxisOffsetXYZ
+	//LIS3DSH_AccelerometerCalibration();
+	//--------------------------------------------------------------------------------------------
+
+
+
+	//--------------------------------------------------------------------------------------------
+	// делаем сдвиг данных в датчике ( если нужно ) (используем в калибровке)
+	// OFFSET -> Output(axis) = Measurement(axis) - OFFSET_x(axis) * 32
+	// значения 4096/32 = 128 (-128...+127)
+	//int8_t OffsetXYZ[3] = { 0, 0, 0 };
+	//LIS3DSH_setAxisOffsetXYZ( OffsetXYZ );	// записываем сдвиг
+	//LIS3DSH_getAxisOffsetXYZ( OffsetXYZ );	// считываем здвиг
+	//--------------------------------------------------------------------------------------------
+	
+	
+	// если в конфигураторе проекта не ключили прерывание пина МК то включаем
+	//HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+	//HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+		
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+while(1)===========================================================================================================================
+	
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	
+		// считываем температуру датчика ( кратно 1 градусу ) в Celsius
+		temperature = LIS3DSH_getTemperature();
+
+#if 0
+		
+		// если новые данные готовы то считываем их
+		if( LIS3DSH_newDataRedy() ==  1 ){
+			
+				// считываем данные с осей XYZ указав масив int16_t для трех осей
+				LIS3DSH_ReadXYZ( AccXYZ );
+				
+				//===== получаем градусы наклона ( крен и тангаж ) ==========================================================
+					
+				// данные расчеты нам нужны для получения градусов наклона
+				double X_out = AccXYZ[0];
+				double Y_out = AccXYZ[1];
+				double Z_out = AccXYZ[2];
+
+				
+				// варианты расчета углов 
+				// углы от (0 до 90 и от 90 до 0 ) и (0 до -90 и от -90 до 0 ) ( немного лучше измерения )
+				#if 0
+							// Calculate Roll and Pitch (rotation around X-axis, rotation around Y-axis)
+							roll = atan(Y_out / sqrt(pow(X_out, 2) + pow(Z_out, 2))) * 180 / PI;
+							pitch = atan(X_out / sqrt(pow(Y_out, 2) + pow(Z_out, 2))) * 180 / PI;
+							
+				#endif
+					
+				// углы от (0 до 360) ( но из-за оси Z в некоторых позах некоректно измеряет угол )
+				#if 0
+						roll = atan2(Y_out , Z_out) * 180 / PI;
+						if( Y_out < 0 ){ roll = 360 + roll; }
+						
+						pitch = atan2((X_out) , Z_out) * 180 / PI;
+						if( X_out < 0 ){ pitch = 360 + pitch; }
+				#endif
+
+				
+				#if 1
+						X_out /= 100.0f;
+						Y_out /= 100.0f;
+						Z_out /= 100.0f;	
+
+						float fNormAcc = sqrt((X_out*X_out)+(Y_out*Y_out)+(Z_out*Z_out));
+
+						float fSinRoll = -Y_out/fNormAcc;
+						float fCosRoll = sqrt((fSinRoll * fSinRoll));				// sqrt((1.0 - fSinRoll * fSinRoll));
+						if( Y_out < 0 ){ fCosRoll = (-1 * fCosRoll); }
+						
+						
+						float fSinPitch = -X_out/fNormAcc;
+						float fCosPitch = sqrt((fSinPitch * fSinPitch)); 		//sqrt((1.0 - fSinPitch * fSinPitch));
+						if( X_out < 0 ){ fCosPitch = (-1 * fCosPitch); }
+						
+						
+						// 180 <- 90 -> 0 .... 0 <- 90 -> 180
+						roll = acosf(fCosRoll) * 180/PI;
+						pitch = acosf(fCosPitch) * 180/PI;
+						
+						// 180 <- 90 -> 0 .... 0 <- -90 -> -180
+						if( Z_out < 0 )roll *= -1;
+						if( Z_out < 0 )pitch *= -1;
+
+				#endif	
+
+
+				
+				// Low-pass filter фильтр простой ( плавныое изменение )
+				rollF = 0.94 * rollF + 0.06 * roll;
+				pitchF = 0.94 * pitchF + 0.06 * pitch;
+				//============================================================================================================
+					
+		}		
+
+#endif
+
+
+		if( interrupt_flag == 1 ){
+			interrupt_flag = 0;
+			
+			HAL_GPIO_WritePin( LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+			HAL_Delay (100);
+			HAL_GPIO_WritePin( LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+			
+			
+			
+//== прерывание когда готовы данные замеров осей ( работает только на INT1 пине ) ==========================
+			// Настройки: (включаем и активируем для автомат машины 1 ( так как это прерывание работает только на нем )
+			//myAccInterruptConfig.Interrupt_Request = LIS3DSH_INTERRUPT_REQUEST_LATCHED;  					// LIS3DSH_INTERRUPT_REQUEST_PULSED - пульс   или   LIS3DSH_INTERRUPT_REQUEST_LATCHED - защелка
+			//myAccInterruptConfig.Interrupt_Selection_Enable = LIS3DSH_INTERRUPT_1_ENABLE;				  // сигнал на ножке если не включен то будет (High-Z state) LIS3DSH_INTERRUPT_1_ENABLE,  LIS3DSH_INTERRUPT_2_ENABLE ,  LIS3DSH_INTERRUPT_1_2_ENABLE
+			//myAccInterruptConfig.Interrupt_Vector_Filter = LIS3DSH_VLIFT_VECTOR_FILTER_ENABLE;		// вкл или выкл векторный фильтр LIS3DSH_VLIFT_VECTOR_FILTER_ENABLE, LIS3DSH_VLIFT_VECTOR_FILTER_DISABLE
+			//myAccInterruptConfig.Interrupt_Signal = LIS3DSH_INTERRUPT_SIGNAL_HIGH;								// LIS3DSH_INTERRUPT_SIGNAL_HIGH    LIS3DSH_INTERRUPT_SIGNAL_LOW
+			//myAccInterruptConfig.Interrupt_DataReady_INT1 = LIS3DSH_INTERRUPT_DATA_READY_ENABLE;	// включаем или отключаем прерывание когда данные готовы ( работает только на INT1 ) LIS3DSH_INTERRUPT_DATA_READY_ENABLE, LIS3DSH_INTERRUPT_DATA_READY_DISABLE
+			//myAccInterruptConfig.State_Machine1_Enable = LIS3DSH_SM_ENABLE;												// включаем текуший автомат или нет LIS3DSH_SM_DISABLE    LIS3DSH_SM_ENABLE
+			//myAccInterruptConfig.State_Machine1_Interrupt = LIS3DSH_SM_INT1;											// на каких ножках будет прерывание LIS3DSH_SM_INT1   LIS3DSH_SM_INT2
+			//myAccInterruptConfig.State_Machine1_Hysteresis = LIS3DSH_SM_HYST_3;										// указываем уровень гистерезиса от 0 до 7
+			//LIS3DSH_InterruptConfig( &myAccInterruptConfig );
+			
+			// если новые данные готовы то считываем их
+//			if( LIS3DSH_newDataRedy() ==  1 ){
+//				// считываем данные с осей XYZ указав масив int16_t для трех осей
+//				LIS3DSH_ReadXYZ( AccXYZ );
+//			}
+//==========================================================================================================
+			
+			
+			// после срабатывания прерывания чистим флаг ( какая машина вызвала тот и чистим )
+			LIS3DSH_clearInterruptSM1();
+			LIS3DSH_clearInterruptSM2();
+		
+		}
+			
+		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	.........
+	.........
+	.........
+	.........
+
+=== end while(1) ==================================================================================================================
+=== end main() ====================================================================================================================
+
+
+//=========================================================================================
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	// проверяем какое именно прерывание отработало -  INTERRUPT_2_Pin
+	if(GPIO_Pin == INT_2_Pin )
+	{
+		interrupt_flag = 1;
+	}
+}
+
+//=========================================================================================
